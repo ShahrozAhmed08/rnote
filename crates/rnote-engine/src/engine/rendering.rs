@@ -177,6 +177,7 @@ impl Engine {
         self.draw_document_shadow_to_gtk_snapshot(snapshot);
         self.draw_background_to_gtk_snapshot(snapshot)?;
         self.draw_format_borders_to_gtk_snapshot(snapshot)?;
+        self.draw_page_headers_to_gtk_snapshot(snapshot)?;
         self.draw_origin_indicator_to_gtk_snapshot(snapshot)?;
         self.store
             .draw_strokes_to_gtk_snapshot(snapshot, doc_bounds, viewport);
@@ -311,12 +312,97 @@ impl Engine {
                         gdk::RGBA::from_compose_color(self.document.config.format.border_color),
                         gdk::RGBA::from_compose_color(self.document.config.format.border_color),
                     ],
-                )
+                );
+
+                
             }
 
             snapshot.pop();
         }
 
+        Ok(())
+    }
+
+    #[cfg(feature = "ui")]
+    fn draw_page_headers_to_gtk_snapshot(&self, snapshot: &gtk4::Snapshot) -> anyhow::Result<()> {
+        use crate::ext::{GdkRGBAExt, GrapheneRectExt};
+        use gtk4::{gdk, graphene, gsk, prelude::*};
+        use p2d::bounding_volume::BoundingVolume;
+        use rnote_compose::SplitOrder;
+        use rnote_compose::ext::AabbExt;
+        use chrono::Local;
+
+        let viewport = self.camera.viewport();
+        let doc_bounds = self.document.bounds();
+
+        snapshot.push_clip(&graphene::Rect::from_p2d_aabb(doc_bounds.loosened(2.0)));
+
+        for page_bounds in doc_bounds.split_extended_origin_aligned(
+            self.document.config.format.size(),
+            SplitOrder::default(),
+        ) {
+            if !page_bounds.intersects(&viewport) {
+                continue;
+            }
+
+            let header_height = 24.0_f32;
+            let page_width = (page_bounds.maxs[0] - page_bounds.mins[0]) as f32;
+            let x = page_bounds.mins[0] as f32;
+            let y = page_bounds.mins[1] as f32;
+
+            // Header background bar
+            snapshot.append_node(
+                gsk::ColorNode::new(
+                    &gdk::RGBA::from_compose_color(self.document.config.format.border_color),
+                    &graphene::Rect::new(x, y, page_width, header_height),
+                ).upcast(),
+            );
+
+            // Draw text using cairo
+            let now = Local::now();
+            let date_str = now.format("%d-%b-%y %H:%M").to_string();
+
+            let cairo_rect = graphene::Rect::new(x, y, page_width, header_height);
+            let cairo_cx = snapshot.append_cairo(&cairo_rect);
+
+            cairo_cx.set_source_rgb(1.0, 1.0, 1.0);
+            cairo_cx.select_font_face(
+                "Sans",
+                cairo::FontSlant::Normal,
+                cairo::FontWeight::Normal,
+            );
+            cairo_cx.set_font_size(11.0);
+
+            // Date - top left
+            cairo_cx.move_to((x + 8.0) as f64, (y + 16.0) as f64);
+            cairo_cx.show_text(&date_str)?;
+
+            // Logo - top right
+            // Logo - top right (PNG image)
+            if let Some(logo_bytes) = gtk4::gio::resources_lookup_data(
+                "/com/github/flxzt/rnote/logo.png",
+                gtk4::gio::ResourceLookupFlags::NONE,
+            ).ok() {
+                let mut cursor = std::io::Cursor::new(logo_bytes.as_ref());
+                if let Ok(logo_surface) = cairo::ImageSurface::create_from_png(&mut cursor) {
+                    let logo_height = header_height as f64 - 4.0;
+                    let scale = logo_height / logo_surface.height() as f64;
+                    let logo_width = logo_surface.width() as f64 * scale;
+
+                    cairo_cx.save()?;
+                    cairo_cx.translate(
+                        (x + page_width) as f64 - logo_width - 8.0,
+                        (y + 2.0) as f64,
+                    );
+                    cairo_cx.scale(scale, scale);
+                    cairo_cx.set_source_surface(&logo_surface, 0.0, 0.0)?;
+                    cairo_cx.paint()?;
+                    cairo_cx.restore()?;
+                }
+            }
+        }
+
+        snapshot.pop();
         Ok(())
     }
 

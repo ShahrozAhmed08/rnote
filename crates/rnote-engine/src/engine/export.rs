@@ -459,13 +459,13 @@ impl Engine {
             doc_export_prefs_override.unwrap_or(self.config.read().export_prefs.doc_export_prefs);
         let pages_content = self.extract_pages_content(doc_export_prefs.page_order);
         let format_size = self.document.config.format.size();
+        let border_color = self.document.config.format.border_color;
 
         rayon::spawn(move || {
             let result = || -> anyhow::Result<Vec<u8>> {
                 let target_surface =
                     cairo::PdfSurface::for_stream(format_size[0], format_size[1], Vec::<u8>::new())
                         .context("Creating Pdf target surface failed.")?;
-
                 target_surface
                     .set_metadata(cairo::PdfMetadata::Title, title.as_str())
                     .context("Set pdf surface title metadata failed.")?;
@@ -475,12 +475,9 @@ impl Engine {
                         crate::utils::now_formatted_string().as_str(),
                     )
                     .context("Set pdf surface date metadata failed.")?;
-
-                // New scope to avoid errors when flushing
                 {
                     let cairo_cx = cairo::Context::new(&target_surface)
                         .context("Creating new cairo context for pdf target surface failed.")?;
-
                     for (i, page_content) in pages_content.into_iter().enumerate() {
                         let Some(page_bounds) = page_content.bounds() else {
                             continue;
@@ -495,6 +492,56 @@ impl Engine {
                             DocExportPrefs::MARGIN,
                             Engine::STROKE_EXPORT_IMAGE_SCALE,
                         )?;
+                        {
+                            use chrono::Local;
+                            let now = Local::now();
+                            let date_str = now.format("%d-%b-%y %H:%M").to_string();
+                            let header_height = 20.0_f64;
+                            let page_width = page_bounds.maxs[0] - page_bounds.mins[0];
+
+                            // Header background
+                            cairo_cx.set_source_rgba(
+                                border_color.r as f64,
+                                border_color.g as f64,
+                                border_color.b as f64,
+                                border_color.a as f64,
+                            );
+                            cairo_cx.rectangle(
+                                page_bounds.mins[0],
+                                page_bounds.mins[1],
+                                page_width,
+                                header_height,
+                            );
+                            cairo_cx.fill()?;
+
+                            // Date text
+                            cairo_cx.set_source_rgb(1.0, 1.0, 1.0);
+                            cairo_cx.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+                            cairo_cx.set_font_size(11.0);
+                            cairo_cx.move_to(page_bounds.mins[0] + 8.0, page_bounds.mins[1] + 15.0);
+                            cairo_cx.show_text(&date_str)?;
+
+                            // Logo
+                            if let Ok(logo_bytes) = gio::resources_lookup_data(
+                                "/com/github/flxzt/rnote/logo.png",
+                                gio::ResourceLookupFlags::NONE,
+                            ) {
+                                let mut cursor = std::io::Cursor::new(logo_bytes.as_ref() as &[u8]);
+                                if let Ok(logo_surface) = cairo::ImageSurface::create_from_png(&mut cursor) {
+                                    let scale = (header_height - 4.0) / logo_surface.height() as f64;
+                                    let logo_width = logo_surface.width() as f64 * scale;
+                                    cairo_cx.save()?;
+                                    cairo_cx.translate(
+                                        page_bounds.maxs[0] - logo_width - 8.0,
+                                        page_bounds.mins[1] + 2.0,
+                                    );
+                                    cairo_cx.scale(scale, scale);
+                                    cairo_cx.set_source_surface(&logo_surface, 0.0, 0.0)?;
+                                    cairo_cx.paint()?;
+                                    cairo_cx.restore()?;
+                                }
+                            }
+                        }
                         cairo_cx.show_page().map_err(|e| {
                             anyhow::anyhow!(
                                 "Showing page failed while exporting page {i} as pdf, Err: {e:?}"
@@ -510,20 +557,16 @@ impl Engine {
                     .map_err(|e| {
                         anyhow::anyhow!("Downcasting finished output stream failed, Err: {e:?}")
                     })?;
-
                 Ok(data)
             };
-
             if oneshot_sender.send(result()).is_err() {
                 error!(
                     "Sending result to receiver failed while exporting document as Pdf bytes. Receiver already dropped."
                 );
             }
         });
-
         oneshot_receiver
     }
-
     /// Export the document as a Xournal++ .xopp file.
     fn export_doc_as_xopp_bytes(
         &self,
